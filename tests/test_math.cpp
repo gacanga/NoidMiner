@@ -84,6 +84,25 @@ int main()
         for (int j = 0; j < 4; j++) if (!noid::eq(to_u(t[j]), s[j])) tbad++;
     }
     printf("permutation (tower engine): %s\n", tbad ? "FAIL" : "ok");
+
+    // N = 2 interleaved permutations (table + kop policies)
+    int nbad = 0;
+    for (int i = 0; i < 100; i++) {
+        noid::u128 a[4], b[4];
+        for (int j = 0; j < 4; j++) { a[j] = noid::mk(rng.next(), rng.next()); b[j] = noid::mk(rng.next(), rng.next()); }
+        W4 t[2][4], k[2][4];
+        for (int j = 0; j < 4; j++) { t[0][j] = k[0][j] = to_w4(a[j]); t[1][j] = k[1][j] = to_w4(b[j]); }
+        noid::permute_flat(a);
+        noid::permute_flat(b);
+        permute_n<2>(t, cmt, rc);
+        permute_n<2>(k, cmk, rc);
+        for (int j = 0; j < 4; j++) {
+            if (!noid::eq(to_u(t[0][j]), a[j]) || !noid::eq(to_u(t[1][j]), b[j])) nbad++;
+            if (!noid::eq(to_u(k[0][j]), a[j]) || !noid::eq(to_u(k[1][j]), b[j])) nbad++;
+        }
+    }
+    printf("permutation x2 interleaved: %s\n", nbad ? "FAIL" : "ok");
+    tbad += nbad;
     pbad += cbad + tbad;
     return (bad || pbad) ? 1 : 0;
 }
