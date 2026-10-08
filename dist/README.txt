@@ -1,4 +1,4 @@
-NoidMiner v0.3.0 - GPU miner for ParanO(1)d (NOID), Windows x64, NVIDIA CUDA 12
+NoidMiner v0.3.1 - GPU miner for ParanO(1)d (NOID), Windows x64, NVIDIA CUDA 12
 ================================================================================
 
 Open-source (Apache-2.0), NO developer fee.
