@@ -1,0 +1,18 @@
+NoidMiner
+Copyright 2026 gacanga
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product contains constants (Poseidon2b round constants, MDS matrices,
+basis conversion matrices) and test vectors derived from ParanO(1)d
+(https://github.com/ignotusnemo/parano1d), Copyright (C) 2026 Paranoid Zero,
+licensed under the Apache License, Version 2.0.
+
+Binary releases additionally contain:
+- cudart64_12.dll: NVIDIA CUDA Runtime 12.9, redistributed under the NVIDIA
+  CUDA Toolkit End User License Agreement (redistributable software).
+- OpenSSL 3 (statically linked into noidminer.exe), Apache License 2.0,
+  https://www.openssl.org
+- MinGW-w64 runtime and GCC support libraries (statically linked), under
+  their respective licenses (GCC Runtime Library Exception, MIT/ZPL-style).
+- ca-bundle.crt: Mozilla CA certificate store, Mozilla Public License 2.0.
