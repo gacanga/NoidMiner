@@ -9,7 +9,7 @@
 //   -o / --pool URL      pool url (repeatable, failover order)
 //   -u / --user ADDR.RIG -p / --pass X
 //   --gpus 0,1,2|all     --mode tower|table|kop     --npt N (0 = auto)
-//   --tpb 256|384|512 (threads per block)  --bps N (blocks per SM)   --target-ms N (scan duration, auto npt)
+//   --tpb 256|384|512 (threads per block)  --lanes 1|2 (nonces interleaved per thread)  --bps N (blocks per SM)   --target-ms N (scan duration, auto npt)
 //   --cafile FILE        --ns-order auto|int|bytes   --stats N (seconds)
 //   --log FILE           --args-file FILE (extra arguments read from a file)
 #include <stdio.h>
@@ -37,7 +37,7 @@
 #include "tls_conn.h"
 #include "../gpu/noid_gpu.h"
 
-#define NOIDMINER_VERSION "0.2.0"
+#define NOIDMINER_VERSION "0.3.0"
 
 using Clock = std::chrono::steady_clock;
 using noid::u128;
@@ -82,6 +82,7 @@ struct Config {
     int npt = 0;                    // 0 = auto
     int bps = 2;
     int tpb = 512;
+    int lanes = 1;
     int target_ms = 200;
     std::string cafile;
     std::string ns_order = "auto";
@@ -123,6 +124,7 @@ static bool apply_option(Config& c, const std::string& key, const std::string& v
     else if (k == "npt") c.npt = atoi(val.c_str());
     else if (k == "bps") c.bps = atoi(val.c_str());
     else if (k == "tpb") c.tpb = atoi(val.c_str());
+    else if (k == "lanes") c.lanes = atoi(val.c_str()) == 2 ? 2 : 1;
     else if (k == "target-ms" || k == "target_ms") c.target_ms = atoi(val.c_str());
     else if (k == "cafile") c.cafile = val;
     else if (k == "ns-order" || k == "ns_order") c.ns_order = val;
@@ -268,11 +270,11 @@ static void gpu_worker(const Config& cfg, int idx, int dev)
 {
     GpuStat& st = *g_stats[idx];
     int npt = cfg.npt > 0 ? cfg.npt : 8;
-    void* g = noid_gpu_create(dev, cfg.mode, cfg.tpb, cfg.bps, npt);
+    void* g = noid_gpu_create2(dev, cfg.mode, cfg.tpb, cfg.bps, npt, cfg.lanes);
     if (!g) { LOG("GPU %d: init failed: %s", dev, noid_gpu_last_error(nullptr)); return; }
     st.name = noid_gpu_name(g);
     st.alive = true;
-    LOG("GPU %d: %s, mode %s, %d threads/block, %u nonces per scan", dev, st.name.c_str(), mode_name(cfg.mode), cfg.tpb, noid_gpu_batch(g));
+    LOG("GPU %d: %s, mode %s, %d threads/block, %d lane(s), %u nonces per scan", dev, st.name.c_str(), mode_name(cfg.mode), cfg.tpb, noid_gpu_lanes(g), noid_gpu_batch(g));
 
     std::mt19937_64 rng((uint64_t)Clock::now().time_since_epoch().count() ^ ((uint64_t)dev << 40));
     uint64_t cur_seq = 0;
@@ -647,7 +649,8 @@ static int run_tests(const Config& cfg)
     int total_fail = 0;
     for (int dev : devs) {
         for (int mode = 0; mode < 3; mode++) {
-            void* g = noid_gpu_create(dev, mode, 256, cfg.bps, 2);
+          for (int lanes = 1; lanes <= (mode == NOID_MODE_TOWER ? 1 : 2); lanes++) {
+            void* g = noid_gpu_create2(dev, mode, cfg.tpb, cfg.bps, 2, lanes);
             if (!g) { LOG("TEST GPU %d: create failed: %s", dev, noid_gpu_last_error(nullptr)); total_fail++; continue; }
             int fail = 0;
             for (int vi = 1; vi <= 3; vi++) {
@@ -717,9 +720,10 @@ static int run_tests(const Config& cfg)
                 if (bad || !count_ok) LOG("TEST GPU %d mode %d candidates: %d found (expected ~%.0f), %d wrong", dev, mode, nf, expect, bad);
                 fail += bad + (count_ok ? 0 : 1);
             }
-            LOG("TEST GPU %d %s mode %s: %s", dev, noid_gpu_name(g), mode_name(mode), fail ? "FAILED" : "OK");
+            LOG("TEST GPU %d %s mode %s, %d lane(s): %s", dev, noid_gpu_name(g), mode_name(mode), lanes, fail ? "FAILED" : "OK");
             total_fail += fail;
             noid_gpu_destroy(g);
+          }
         }
     }
     LOG("TEST RESULT: %s", total_fail ? "FAILED" : "ALL OK");
@@ -756,7 +760,7 @@ static int run_bench(const Config& cfg)
         total += r;
         LOG("BENCH GPU %d: %.3f MH/s  (npt %d, scan %d ms) %s", g_stats[i]->dev, r / 1e6, g_stats[i]->npt.load(), g_stats[i]->scan_ms.load(), g_stats[i]->name.c_str());
     }
-    LOG("BENCH TOTAL: %.3f MH/s over %zu GPU(s), mode %s, %d threads/block", total / 1e6, g_stats.size(), mode_name(cfg.mode), cfg.tpb);
+    LOG("BENCH TOTAL: %.3f MH/s over %zu GPU(s), mode %s, %d threads/block, %d lane(s)", total / 1e6, g_stats.size(), mode_name(cfg.mode), cfg.tpb, cfg.lanes);
     g_running = false;
     for (auto& t : th) t.join();
     return 0;
@@ -805,7 +809,7 @@ int main(int argc, char** argv)
         if (a == "--help" || a == "-h") {
             printf("NoidMiner %s - ParanO(1)d (NOID) GPU miner\n"
                    "  noidminer [--config file] [--args-file file] [-o url] [-u addr.rig] [-p x] [--gpus 0,1|all]\n"
-                   "            [--mode tower|table|kop] [--npt N] [--tpb 256|384|512] [--bps N] [--target-ms N] [--cafile f]\n"
+                   "            [--mode tower|table|kop] [--npt N] [--tpb 256|384|512] [--lanes 1|2] [--bps N] [--target-ms N] [--cafile f]\n"
                    "            [--ns-order auto|int|bytes] [--stats s] [--log file] [--test] [--bench [s]]\n", NOIDMINER_VERSION);
             return 0;
         }
