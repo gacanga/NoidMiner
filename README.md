@@ -1,7 +1,7 @@
 # NoidMiner
 
 Open-source GPU miner for **ParanO(1)d (NOID)**, a Poseidon2b proof of work over GF(2^128).
-It runs on **Windows x64** with **NVIDIA CUDA** and connects to the **InnovLab** pool.
+It runs on **Windows x64** and **Linux x64** with **NVIDIA CUDA** and connects to the **InnovLab** pool.
 
 - **No developer fee.** Apache-2.0.
 - Built for **NVIDIA Pascal** (P104-100, GTX 1060/1070/1080, sm_61). The other NOID miners (INVminer, GB Miner, Fl4shMiner, SRBMiner-Multi) only support RTX 30 and newer.
@@ -11,13 +11,17 @@ It runs on **Windows x64** with **NVIDIA CUDA** and connects to the **InnovLab**
 
 ## Download
 
-Get `NoidMiner-v0.3.0-win64-cuda12.zip` from the [Releases](../../releases) page and check its SHA-256.
+From the [Releases](../../releases) page (check the SHA-256):
+- **Windows:** `NoidMiner-v0.3.1-win64-cuda12.zip`
+- **Linux:** `NoidMiner-v0.3.1-linux-x64-cuda12.tar.gz`. It needs glibc 2.35+ (Ubuntu 22.04+, Debian 12+) and an NVIDIA driver with CUDA 12 support. Nothing else: the CUDA runtime, OpenSSL and the C++ runtime are built in.
 
 ## Quick start
 
 1. Unzip the release.
 2. In `noidminer.conf`, replace `YOUR_NOID_ADDRESS` with your NOID payout address. Keep `.rig1` or rename the rig.
-3. Run `start.bat`. It restarts the miner automatically and logs to `noidminer.log`.
+3. Windows: run `start.bat`. Linux: run `./test.sh` once, then `./start.sh`. Both restart the miner automatically and log to `noidminer.log`.
+
+On Linux the scripts are `start.sh`, `test.sh` and `bench.sh`, with the same roles as below.
 
 | Script | Purpose |
 |---|---|
@@ -80,7 +84,20 @@ Prerequisites:
 | `run_pool.bat` | Mines from `bin\` |
 | `windows\build_release.bat` | Portable package: static C runtime, generic x86-64, tested without MSYS2, zipped |
 
-On Linux, validate the arithmetic on the CPU with:
+### Linux
+
+Requirements: **CUDA Toolkit 12.x** (12.0 to 12.9), `build-essential` and `libssl-dev`.
+
+```
+./linux/build_linux.sh      # -> build/noidminer
+./build/noidminer --test
+```
+
+**CUDA 13 removed Pascal.** A binary built with it stops at start with `invalid device function` on GTX 10xx / P10x cards. Install CUDA 12.9 next to it and run `NVCC=/usr/local/cuda-12.9/bin/nvcc ./linux/build_linux.sh`.
+
+`./linux/package_linux.sh` builds the portable release package.
+
+The GPU arithmetic can also be validated on the CPU alone (any OS):
 
 ```
 g++ -O2 -std=c++17 -Isrc -Igpu tests/test_math.cpp src/noid_ref.cpp && ./a.out
@@ -102,9 +119,9 @@ Mineur GPU open source pour **ParanO(1)d (NOID)**, sous **Windows x64** avec **N
 - Pensé pour les cartes **Pascal** (P104-100, GTX 10xx), que les autres mineurs NOID ne gèrent pas.
 
 **Démarrage :**
-1. Téléchargez le zip dans [Releases](../../releases).
+1. Téléchargez l'archive Windows (zip) ou Linux (tar.gz) dans [Releases](../../releases).
 2. Dans `noidminer.conf`, remplacez `YOUR_NOID_ADDRESS` par votre adresse NOID.
-3. Lancez `start.bat`.
+3. Lancez `start.bat` (Windows) ou `./test.sh` puis `./start.sh` (Linux, Ubuntu 22.04+ / Debian 12+).
 
 `test.bat` vérifie les calculs et `bench.bat` mesure le hashrate.
 
