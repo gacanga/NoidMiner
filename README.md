@@ -11,7 +11,7 @@ It runs on **Windows x64** with **NVIDIA CUDA** and connects to the **InnovLab**
 
 ## Download
 
-Get `NoidMiner-v0.2.0-win64-cuda12.zip` from the [Releases](../../releases) page and check its SHA-256.
+Get `NoidMiner-v0.3.0-win64-cuda12.zip` from the [Releases](../../releases) page and check its SHA-256.
 
 ## Quick start
 
@@ -37,7 +37,7 @@ Command line help: `noidminer.exe --help`. The main options are:
 
 | GPU | MH/s | Notes |
 |---|---|---|
-| P104-100 (stock, ~175 W) | ~4.75 | engine `table`, 512 threads per block |
+| P104-100 (stock, ~175 W) | ~5.2 | v0.3, engine `table`, 512 threads per block (v0.2: ~4.75) |
 
 This proof of work needs no memory bandwidth. Lowering the memory clock or the power limit saves power for little hashrate.
 
@@ -55,7 +55,9 @@ This proof of work needs no memory bandwidth. Lowering the memory clock or the p
   - GF(2^128) arithmetic runs in the polynomial basis modulo x^128+x^7+x^2+x+1.
   - The 16×16 carry-less products use plain 16-bit integer multiplies (XMAD) on operands split into 3 bit classes (bit index mod 3), so integer carries never collide.
   - Karatsuba goes 16 → 32 → 64 → 128 bits, for 27 products per 128-bit multiply.
-- **MDS constants:** the `table` engine multiplies by them with 4-bit tables in shared memory. The alternatives are the `tower` engine (partial rounds in the tower basis) and `kop` (pure ALU).
+  - The 9 middle products of the 32-bit level sit at a 16-bit offset. They are accumulated in a separate vector and shifted once at the end.
+- **Squaring:** spreads the bits with PRMT byte lookups, 4 nibbles per instruction.
+- **MDS constants:** the `table` engine multiplies by them with 4-bit tables in shared memory. One PRMT builds the addresses of two lookups. The alternatives are the `tower` engine (partial rounds in the tower basis) and `kop` (pure ALU).
 - **Validation:** all GPU arithmetic also compiles as plain C++. `tests/test_math.cpp` checks it against `src/noid_ref.cpp`, which itself matches 64 vectors produced by the official crates (`tools/noidvec`).
 
 ### Pool protocol (InnovLab, `parano1d-stratum-v1`)
@@ -106,4 +108,4 @@ Mineur GPU open source pour **ParanO(1)d (NOID)**, sous **Windows x64** avec **N
 
 `test.bat` vérifie les calculs et `bench.bat` mesure le hashrate.
 
-**Performance :** environ 4,75 MH/s par P104-100. L'algorithme n'utilise pas la mémoire : baisser l'horloge mémoire ou la limite de puissance économise du courant sans perte notable de hashrate.
+**Performance :** environ 5,2 MH/s par P104-100 (v0.3). L'algorithme n'utilise pas la mémoire : baisser l'horloge mémoire ou la limite de puissance économise du courant sans perte notable de hashrate.
