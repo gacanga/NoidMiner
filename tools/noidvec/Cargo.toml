@@ -1,0 +1,15 @@
+# noidvec - dumps the Poseidon2b constants and the test vectors used by NoidMiner,
+# straight from the official ParanO(1)d crates.
+#   cargo run --release -- consts > consts.txt
+#   cargo run --release > ../../tests/vectors.txt
+[package]
+name = "noidvec"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+noid_core = { git = "https://github.com/ignotusnemo/parano1d", tag = "v2.0.2" }
+noid_poseidon2b = { git = "https://github.com/ignotusnemo/parano1d", tag = "v2.0.2" }
+hex = "0.4"
+
+[workspace]
