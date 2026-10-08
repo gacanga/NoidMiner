@@ -1,4 +1,4 @@
-NoidMiner v0.2.0 - GPU miner for ParanO(1)d (NOID), Windows x64, NVIDIA CUDA 12
+NoidMiner v0.3.0 - GPU miner for ParanO(1)d (NOID), Windows x64, NVIDIA CUDA 12
 ================================================================================
 
 Open-source (Apache-2.0), NO developer fee.
@@ -19,7 +19,7 @@ Requirements
   - Native kernel for Pascal (sm_61); newer GPUs run it through the driver's JIT
     (works, but dedicated miners are much faster on RTX 30 and newer)
 
-Reference hashrate: P104-100 ~4.75 MH/s (stock, ~175 W).
+Reference hashrate: P104-100 ~5.2 MH/s (stock, ~175 W).
 The algorithm needs no memory bandwidth: lowering the memory clock or the power
 limit saves power at little hashrate cost.
 
@@ -37,6 +37,7 @@ Démarrage rapide
   2. Double-cliquez sur start.bat.
 
 test.bat : tests de calcul. bench.bat : mesure du hashrate pendant 30 s.
+Hashrate de référence : P104-100 ~5,2 MH/s.
 L'algorithme n'utilise pas la mémoire : baisser l'horloge mémoire ou la limite
 de puissance économise du courant sans perte notable de hashrate.
 
