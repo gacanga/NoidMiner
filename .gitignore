@@ -1,0 +1,13 @@
+# build outputs
+dev/
+bin/
+build/
+release/
+exp1/
+exp2/
+logs/
+run/
+*.obj
+*.exp
+*.lib
+*.cubin
