@@ -218,7 +218,13 @@ static bool ck(Ctx* c, cudaError_t e, const char* what)
 {
     if (e == cudaSuccess) return true;
     char* dst = c ? c->err : g_err;
-    snprintf(dst, 512, "%s: %s", what, cudaGetErrorString(e));
+    if (e == cudaErrorInvalidDeviceFunction || e == cudaErrorNoKernelImageForDevice)
+        // the binary holds no code for this GPU: typically built with CUDA 13
+        // (no Pascal support) or without -arch=sm_61
+        snprintf(dst, 512, "%s: %s (this build has no kernel for this GPU: Pascal GTX 10xx / P10x needs CUDA 12.x and -arch=sm_61, see linux/build_linux.sh)",
+                 what, cudaGetErrorString(e));
+    else
+        snprintf(dst, 512, "%s: %s", what, cudaGetErrorString(e));
     return false;
 }
 
