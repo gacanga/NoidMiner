@@ -9,7 +9,7 @@ REM   Log: logs\release.log
 REM ===========================================================================
 setlocal EnableExtensions
 cd /d "%~dp0.."
-set "VER=0.2.0"
+set "VER=0.3.0"
 set "NAME=NoidMiner-v%VER%-win64-cuda12"
 set "OUT=release\%NAME%"
 if not exist logs mkdir logs

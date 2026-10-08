@@ -2,6 +2,8 @@ LIBRARY noidgpu.dll
 EXPORTS
     noid_gpu_device_count
     noid_gpu_create
+    noid_gpu_create2
+    noid_gpu_lanes
     noid_gpu_destroy
     noid_gpu_name
     noid_gpu_last_error
