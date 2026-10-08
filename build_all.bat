@@ -4,6 +4,7 @@ REM build_all.bat - development build into dev\ (the running miner uses bin\),
 REM then the correctness tests (logs\test.log).
 REM     build_all.bat          build dev\ + tests
 REM     build_all.bat nobuild  tests only
+REM   If run\release.flag exists: release package instead (windows\build_release.bat)
 REM   If run\exp.flag exists: profiling builds instead (exp_build.bat, logs\exp.log)
 REM Logs: logs\build_gpu_dll.log, logs\build_host.log, logs\test.log,
 REM       summary logs\build_all.log
@@ -15,6 +16,12 @@ if not exist logs mkdir logs
 if not exist dev mkdir dev
 set "S=%CD%\logs\build_all.log"
 echo [%date% %time%] build_all start %* > "%S%"
+if exist run\release.flag (
+    del /q run\release.flag
+    echo [%date% %time%] release build >> "%S%"
+    call windows\build_release.bat
+    goto end
+)
 if exist run\exp.flag (
     del /q run\exp.flag
     echo [%date% %time%] profiling experiments >> "%S%"
