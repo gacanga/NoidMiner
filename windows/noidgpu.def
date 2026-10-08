@@ -1,0 +1,12 @@
+LIBRARY noidgpu.dll
+EXPORTS
+    noid_gpu_device_count
+    noid_gpu_create
+    noid_gpu_destroy
+    noid_gpu_name
+    noid_gpu_last_error
+    noid_gpu_batch
+    noid_gpu_set_nonces_per_thread
+    noid_gpu_set_job
+    noid_gpu_scan
+    noid_gpu_digest_test
