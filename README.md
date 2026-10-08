@@ -89,13 +89,13 @@ Prerequisites:
 Requirements: **CUDA Toolkit 12.x** (12.0 to 12.9), `build-essential` and `libssl-dev`.
 
 ```
-./linux/build_linux.sh      # -> build/noidminer
+bash linux/build_linux.sh      # -> build/noidminer
 ./build/noidminer --test
 ```
 
-**CUDA 13 removed Pascal.** A binary built with it stops at start with `invalid device function` on GTX 10xx / P10x cards. Install CUDA 12.9 next to it and run `NVCC=/usr/local/cuda-12.9/bin/nvcc ./linux/build_linux.sh`.
+**CUDA 13 removed Pascal.** A binary built with it stops at start with `invalid device function` on GTX 10xx / P10x cards. Install CUDA 12.9 next to it and run `NVCC=/usr/local/cuda-12.9/bin/nvcc bash linux/build_linux.sh`.
 
-`./linux/package_linux.sh` builds the portable release package.
+`bash linux/package_linux.sh` builds the portable release package.
 
 The GPU arithmetic can also be validated on the CPU alone (any OS):
 
