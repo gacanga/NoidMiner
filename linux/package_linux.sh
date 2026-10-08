@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 VER="$(sed -n 's/^#define NOIDMINER_VERSION "\(.*\)"/\1/p' src/main.cpp)"
 NAME="NoidMiner-v$VER-linux-x64-cuda12"
-NOID_HOST_ARCH="-march=x86-64 -mtune=generic" ./linux/build_linux.sh
+NOID_HOST_ARCH="-march=x86-64 -mtune=generic" bash linux/build_linux.sh
 OUT="release/$NAME"
 rm -rf "$OUT" "release/$NAME.tar.gz"
 mkdir -p "$OUT"

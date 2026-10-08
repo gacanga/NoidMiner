@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # build_linux.sh - builds NoidMiner for Linux x86-64 (NVIDIA Pascal sm_61 and newer).
 #
-#   ./linux/build_linux.sh            -> build/noidminer (+ build/vectors.txt)
+#   bash linux/build_linux.sh         -> build/noidminer (+ build/vectors.txt)
 #
 # Requirements (Ubuntu/Debian):
 #   * CUDA Toolkit 12.x (12.0 .. 12.9). CUDA 13 dropped Pascal (GTX 10xx,
@@ -28,7 +28,7 @@ echo "nvcc: $NVCC (CUDA $VER)"
 ARCH="${CUDA_ARCH:-61}"
 if [ "$MAJOR" -ge 13 ] && [ "$ARCH" -lt 75 ]; then
     echo "ERROR: CUDA $VER cannot build for sm_$ARCH (Pascal support was removed in CUDA 13)."
-    echo "       Install CUDA 12.x (e.g. 12.9) next to it and run: NVCC=/usr/local/cuda-12.9/bin/nvcc $0"
+    echo "       Install CUDA 12.x (e.g. 12.9) next to it and run: NVCC=/usr/local/cuda-12.9/bin/nvcc bash $0"
     exit 1
 fi
 if [ "$MAJOR" -lt 12 ]; then echo "WARNING: CUDA $VER is older than the tested 12.x"; fi
