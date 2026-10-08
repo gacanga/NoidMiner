@@ -1,0 +1,8 @@
+*.bat  text eol=crlf
+*.conf text eol=crlf
+*.def  text eol=crlf
+*.sh   text eol=lf
+*.cu   text
+*.h    text
+*.cpp  text
+*.md   text
