@@ -97,6 +97,34 @@ __device__ __forceinline__ void hash_nonce(uint32_t lo32, W4 s[4], const uint32_
     }
 }
 
+// N nonces per thread interleaved (table / kop engines)
+template <int MODE, int N>
+__device__ __forceinline__ void hash_nonce_n(const uint32_t lo32[N], W4 s[N][4], const uint32_t* stbl)
+{
+    RCDev rc;
+    const W4 base = ldw4(c_job.nonce_base);
+    const W4 m0 = ldw4(c_job.mid + 0), m1 = w4x(ldw4(c_job.mid + 4), ldw4(c_job.f11));
+    const W4 m2 = ldw4(c_job.mid + 8), m3 = ldw4(c_job.mid + 12);
+#pragma unroll
+    for (int n = 0; n < N; n++) {
+        s[n][0] = w4x(m0, w4x(base, t2f_lo32(lo32[n])));
+        s[n][1] = m1;
+        s[n][2] = m2;
+        s[n][3] = m3;
+    }
+#pragma unroll 1
+    for (int b = 0; b < 3; b++) {
+        if (MODE == NOID_MODE_KOP) { CMulKopConst cm; permute_n<N>(s, cm, rc); }
+        else { CMulTable cm{ stbl }; permute_n<N>(s, cm, rc); }
+        if (b < 2) {
+            const W4 a0 = ldw4(b == 0 ? c_job.f12 : c_job.f14);
+            const W4 a1 = ldw4(b == 0 ? c_job.f13 : c_job.f15);
+#pragma unroll
+            for (int n = 0; n < N; n++) { s[n][0] = w4x(s[n][0], a0); s[n][1] = w4x(s[n][1], a1); }
+        }
+    }
+}
+
 template <int MODE>
 __device__ __forceinline__ void load_tables(const uint32_t* __restrict__ gtbl, uint32_t* stbl)
 {
@@ -107,7 +135,7 @@ __device__ __forceinline__ void load_tables(const uint32_t* __restrict__ gtbl, u
     }
 }
 
-template <int MODE, int TPB, int MINB>
+template <int MODE, int N, int TPB, int MINB>
 __global__ void __launch_bounds__(TPB, MINB)
 scan_kernel(const uint32_t* __restrict__ gtbl, const uint2* __restrict__ f2t, uint32_t lo32_start, int npt, uint32_t* out)
 {
@@ -117,13 +145,29 @@ scan_kernel(const uint32_t* __restrict__ gtbl, const uint2* __restrict__ f2t, ui
     const uint32_t gid = blockIdx.x * blockDim.x + threadIdx.x;
     const uint64_t target = ((uint64_t)c_job.target_hi[1] << 32) | c_job.target_hi[0];
     for (int it = 0; it < npt; it++) {
-        uint32_t lo32 = lo32_start + gid + (uint32_t)it * total;
-        W4 s[4];
-        hash_nonce<MODE>(lo32, s, stbl);
-        uint64_t top = f2t_top64(s[1], f2t);
-        if (top <= target) {
-            uint32_t idx = atomicAdd(out, 1u);
-            if (idx < MAX_FOUND) out[1 + idx] = lo32;
+        if (N == 1 || MODE == NOID_MODE_TOWER) {
+            uint32_t lo32 = lo32_start + gid + (uint32_t)it * total;
+            W4 s[4];
+            hash_nonce<MODE>(lo32, s, stbl);
+            uint64_t top = f2t_top64(s[1], f2t);
+            if (top <= target) {
+                uint32_t idx = atomicAdd(out, 1u);
+                if (idx < MAX_FOUND) out[1 + idx] = lo32;
+            }
+        } else {
+            uint32_t lo32[N];
+            W4 s[N][4];
+#pragma unroll
+            for (int n = 0; n < N; n++) lo32[n] = lo32_start + gid + (uint32_t)(it * N + n) * total;
+            hash_nonce_n<MODE, N>(lo32, s, stbl);
+#pragma unroll
+            for (int n = 0; n < N; n++) {
+                uint64_t top = f2t_top64(s[n][1], f2t);
+                if (top <= target) {
+                    uint32_t idx = atomicAdd(out, 1u);
+                    if (idx < MAX_FOUND) out[1 + idx] = lo32[n];
+                }
+            }
         }
     }
 }
@@ -146,7 +190,7 @@ __global__ void digest_kernel(const uint32_t* __restrict__ gtbl, uint32_t lo32_s
 // host side
 // ---------------------------------------------------------------------------
 struct Ctx {
-    int dev, mode, tpb, bps, npt, nsm;
+    int dev, mode, tpb, bps, npt, nsm, lanes;
     uint32_t* d_tbl;
     uint2* d_f2t;
     uint32_t* d_out;
@@ -244,19 +288,20 @@ extern "C" const char* noid_gpu_last_error(void* ctx)
 typedef void (*scan_fn)(const uint32_t*, const uint2*, uint32_t, int, uint32_t*);
 typedef void (*digest_fn)(const uint32_t*, uint32_t, int, uint32_t*);
 
-template <int MODE>
+template <int MODE, int N>
 static scan_fn pick_scan_m(int tpb)
 {
-    if (tpb == 384) return scan_kernel<MODE, 384, 2>;
-    if (tpb == 512) return scan_kernel<MODE, 512, 2>;
-    return scan_kernel<MODE, 256, 2>;
+    if (tpb == 384) return scan_kernel<MODE, N, 384, 2>;
+    if (tpb == 512) return scan_kernel<MODE, N, 512, 2>;
+    return scan_kernel<MODE, N, 256, 2>;
 }
 
-static scan_fn pick_scan(int mode, int tpb)
+// lanes: nonces interleaved per thread (1 or 2; the tower engine always uses 1)
+static scan_fn pick_scan(int mode, int tpb, int lanes)
 {
-    if (mode == NOID_MODE_KOP) return pick_scan_m<NOID_MODE_KOP>(tpb);
-    if (mode == NOID_MODE_TOWER) return pick_scan_m<NOID_MODE_TOWER>(tpb);
-    return pick_scan_m<NOID_MODE_TABLE>(tpb);
+    if (mode == NOID_MODE_TOWER) return pick_scan_m<NOID_MODE_TOWER, 1>(tpb);
+    if (mode == NOID_MODE_KOP) return lanes == 2 ? pick_scan_m<NOID_MODE_KOP, 2>(tpb) : pick_scan_m<NOID_MODE_KOP, 1>(tpb);
+    return lanes == 2 ? pick_scan_m<NOID_MODE_TABLE, 2>(tpb) : pick_scan_m<NOID_MODE_TABLE, 1>(tpb);
 }
 
 static digest_fn pick_digest(int mode)
@@ -266,10 +311,11 @@ static digest_fn pick_digest(int mode)
     return digest_kernel<NOID_MODE_TABLE>;
 }
 
-extern "C" void* noid_gpu_create(int device, int mode, int tpb, int bps, int npt)
+extern "C" void* noid_gpu_create2(int device, int mode, int tpb, int bps, int npt, int lanes)
 {
     Ctx* c = (Ctx*)calloc(1, sizeof(Ctx));
     c->dev = device;
+    c->lanes = (lanes == 2 && mode != NOID_MODE_TOWER) ? 2 : 1;
     c->mode = (mode == NOID_MODE_KOP || mode == NOID_MODE_TOWER) ? mode : NOID_MODE_TABLE;
     c->tpb = (tpb == 384 || tpb == 512) ? tpb : 256;
     c->npt = npt > 0 ? npt : 16;
@@ -282,7 +328,7 @@ extern "C" void* noid_gpu_create(int device, int mode, int tpb, int bps, int npt
     c->bps = bps > 0 ? bps : 2;
     int smem = smem_words(c->mode) * 4;
     if (smem) {
-        if (!ck(c, cudaFuncSetAttribute(pick_scan(c->mode, c->tpb), cudaFuncAttributeMaxDynamicSharedMemorySize, smem), "smem attr") ||
+        if (!ck(c, cudaFuncSetAttribute(pick_scan(c->mode, c->tpb, c->lanes), cudaFuncAttributeMaxDynamicSharedMemorySize, smem), "smem attr") ||
             !ck(c, cudaFuncSetAttribute(pick_digest(c->mode), cudaFuncAttributeMaxDynamicSharedMemorySize, smem), "smem attr2")) {
             strcpy(g_err, c->err); free(c); return NULL;
         }
@@ -297,6 +343,13 @@ extern "C" void* noid_gpu_create(int device, int mode, int tpb, int bps, int npt
     if (!ok) { strcpy(g_err, c->err); free(c); return NULL; }
     return c;
 }
+
+extern "C" void* noid_gpu_create(int device, int mode, int tpb, int bps, int npt)
+{
+    return noid_gpu_create2(device, mode, tpb, bps, npt, 1);
+}
+
+extern "C" int noid_gpu_lanes(void* ctx) { return ((Ctx*)ctx)->lanes; }
 
 extern "C" void noid_gpu_destroy(void* ctx)
 {
@@ -313,7 +366,7 @@ extern "C" const char* noid_gpu_name(void* ctx) { return ((Ctx*)ctx)->name; }
 extern "C" uint32_t noid_gpu_batch(void* ctx)
 {
     Ctx* c = (Ctx*)ctx;
-    return (uint32_t)c->nsm * c->bps * c->tpb * c->npt;
+    return (uint32_t)c->nsm * c->bps * c->tpb * c->npt * c->lanes;
 }
 
 extern "C" int noid_gpu_set_nonces_per_thread(void* ctx, int npt)
@@ -339,7 +392,7 @@ extern "C" int noid_gpu_scan(void* ctx, uint32_t lo32_start, uint32_t* found, in
     *n_found = 0;
     if (!ck(c, cudaMemsetAsync(c->d_out, 0, 4, c->st), "memset")) return -1;
     dim3 grid(c->nsm * c->bps), block(c->tpb);
-    pick_scan(c->mode, c->tpb)<<<grid, block, smem_words(c->mode) * 4, c->st>>>(c->d_tbl, c->d_f2t, lo32_start, c->npt, c->d_out);
+    pick_scan(c->mode, c->tpb, c->lanes)<<<grid, block, smem_words(c->mode) * 4, c->st>>>(c->d_tbl, c->d_f2t, lo32_start, c->npt, c->d_out);
     if (!ck(c, cudaGetLastError(), "launch")) return -1;
     if (!ck(c, cudaMemcpyAsync(c->h_out, c->d_out, (1 + MAX_FOUND) * 4, cudaMemcpyDeviceToHost, c->st), "copy out")) return -1;
     if (!ck(c, cudaStreamSynchronize(c->st), "sync")) return -1;

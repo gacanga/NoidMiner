@@ -22,7 +22,7 @@
 #define NOID_UNROLL
 #endif
 
-// x^7 = (x * x^2) * x^4 with one multiply and one squaring instance
+// x^7 (pow7 in noid_math.h)
 // NOID_EXPERIMENT (profiling builds only, results are WRONG):
 //   1 = constant multiplications skipped (arithmetic only)
 //   2 = S-box arithmetic replaced by XORs (table lookups only)
@@ -31,20 +31,7 @@ NOID_HD W4 sbox7(W4 x)
 #if defined(NOID_EXPERIMENT) && NOID_EXPERIMENT == 2
     return w4(x.w1 ^ 0x9e3779b9u, x.w2 ^ x.w0, x.w3 + 7u, x.w0 ^ x.w3);
 #endif
-    W4 sq = x, x2 = x;
-    NOID_UNROLL1
-    for (int k = 0; k < 2; k++) {
-        sq = gsqr(sq);
-        if (k == 0) x2 = sq;
-    }
-    // sq = x^4
-    W4 a = x, b = x2;
-    NOID_UNROLL1
-    for (int k = 0; k < 2; k++) {
-        a = gmul(a, b);
-        b = sq;
-    }
-    return a;
+    return pow7(x);
 }
 
 // MDS layer with a single constant-multiplier instance (4 iterations, rotation)
@@ -102,6 +89,107 @@ NOID_HD void permute(W4 s[4], CM& cm, RC& rc)
 }
 
 // ---------------------------------------------------------------------------
+// N independent permutations interleaved (instruction-level parallelism).
+// Same structure as permute(): one S-box / multiply / squaring / constant
+// multiply instance, each doing the N lanes back to back so the GPU always has
+// independent arithmetic to issue while table loads are in flight.
+// ---------------------------------------------------------------------------
+template <int N>
+NOID_HD void sbox7_n(W4 x[N])
+{
+#if defined(NOID_EXPERIMENT) && NOID_EXPERIMENT == 2
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) x[n] = w4(x[n].w1 ^ 0x9e3779b9u, x[n].w2 ^ x[n].w0, x[n].w3 + 7u, x[n].w0 ^ x[n].w3);
+    return;
+#endif
+    W4 sq[N], x2[N], a[N], b[N];
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) { sq[n] = x[n]; x2[n] = x[n]; }
+    NOID_UNROLL1
+    for (int k = 0; k < 2; k++) {
+        NOID_UNROLL
+        for (int n = 0; n < N; n++) {
+            sq[n] = gsqr(sq[n]);
+            if (k == 0) x2[n] = sq[n];
+        }
+    }
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) { a[n] = x[n]; b[n] = x2[n]; }
+    NOID_UNROLL1
+    for (int k = 0; k < 2; k++) {
+        NOID_UNROLL
+        for (int n = 0; n < N; n++) {
+            a[n] = gmul(a[n], b[n]);
+            b[n] = sq[n];
+        }
+    }
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) x[n] = a[n];
+}
+
+template <int N, class CM>
+NOID_HD void mds_n(W4 s[N][4], bool full, CM& cm)
+{
+    W4 x01[N], x23[N], S[N], u0[N], u1[N], u2[N], u3[N];
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) {
+        x01[n] = w4x(s[n][0], s[n][1]);
+        x23[n] = w4x(s[n][2], s[n][3]);
+        S[n] = w4x(x01[n], x23[n]);
+        if (full) { u0[n] = x01[n]; u1[n] = x23[n]; u2[n] = s[n][1]; u3[n] = s[n][3]; }
+        else      { u0[n] = s[n][0]; u1[n] = s[n][1]; u2[n] = s[n][2]; u3[n] = s[n][3]; }
+    }
+    NOID_UNROLL1
+    for (int i = 0; i < 4; i++) {
+        int c = full ? (i < 2 ? 1 : 0) : 2 + i;
+        W4 p[N];
+        NOID_UNROLL
+        for (int n = 0; n < N; n++) p[n] = cm.mul(c, u0[n]);
+        NOID_UNROLL
+        for (int n = 0; n < N; n++) { u0[n] = u1[n]; u1[n] = u2[n]; u2[n] = u3[n]; u3[n] = p[n]; }
+    }
+    NOID_UNROLL
+    for (int n = 0; n < N; n++) {
+        if (full) {
+            W4 CD = w4x(u2[n], u3[n]);
+            s[n][0] = w4x3(u0[n], CD, S[n]);
+            s[n][1] = w4x3(u0[n], u2[n], x23[n]);
+            s[n][2] = w4x3(u1[n], CD, S[n]);
+            s[n][3] = w4x3(u1[n], u3[n], x01[n]);
+        } else {
+            s[n][0] = w4x(S[n], u0[n]);
+            s[n][1] = w4x(S[n], u1[n]);
+            s[n][2] = w4x(S[n], u2[n]);
+            s[n][3] = w4x(S[n], u3[n]);
+        }
+    }
+}
+
+template <int N, class CM, class RC>
+NOID_HD void permute_n(W4 s[N][4], CM& cm, RC& rc)
+{
+    NOID_UNROLL1
+    for (int r = -1; r < 66; r++) {
+        const bool full = (r < 4) || (r >= 62);
+        const int lanes = r < 0 ? 0 : (full ? 4 : 1);
+        NOID_UNROLL1
+        for (int i = 0; i < lanes; i++) {
+            W4 c = rc.get(i, r);
+            W4 y[N];
+            NOID_UNROLL
+            for (int n = 0; n < N; n++) y[n] = w4x(s[n][0], c);
+            sbox7_n<N>(y);
+            NOID_UNROLL
+            for (int n = 0; n < N; n++) {
+                if (full) { s[n][0] = s[n][1]; s[n][1] = s[n][2]; s[n][2] = s[n][3]; s[n][3] = y[n]; }
+                else      { s[n][0] = y[n]; }
+            }
+        }
+        mds_n<N>(s, full, cm);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // constant multiplier policies
 // ---------------------------------------------------------------------------
 
@@ -124,26 +212,45 @@ struct CMulTable {
         return w4(a.w1 ^ (uint32_t)c, a.w2, a.w3 ^ a.w0, a.w0 + 3u);
 #endif
 #ifdef __CUDA_ARCH__
-        const uint2* t = reinterpret_cast<const uint2*>(tbl) + c * (2 * 32 * 16);
-#else
-        const uint32_t* tw = tbl + c * (2 * 32 * 16 * 2);
-#endif
+        // Byte offset of entry (c, half, nibble k, value v) =
+        //   c*8192 + half*4096 + k*128 + v*8.
+        // v*8 for the 8 nibbles of a word comes from two masked copies
+        // (low nibbles << 3, high nibbles >> 1); one PRMT then merges the
+        // selected byte with the constant's base (bytes 1-2 of `base`), so a
+        // lookup costs 1 PRMT + 2 LDS.64 with immediate offsets.
+        const char* t = reinterpret_cast<const char*>(tbl);
+        const uint32_t base = (uint32_t)c * 8192u;
         uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0;
         uint32_t w[4] = { a.w0, a.w1, a.w2, a.w3 };
         NOID_UNROLL
+        for (int i = 0; i < 4; i++) {
+            const uint32_t mlo = (w[i] << 3) & 0x78787878u;
+            const uint32_t mhi = (w[i] >> 1) & 0x78787878u;
+            NOID_UNROLL
+            for (int j = 0; j < 4; j++) {
+                const uint32_t alo = __byte_perm(mlo, base, 0x7650u | (uint32_t)j);
+                const uint32_t ahi = __byte_perm(mhi, base, 0x7650u | (uint32_t)j);
+                const int k = 8 * i + 2 * j;
+                const uint2 e0 = *reinterpret_cast<const uint2*>(t + alo + k * 128);
+                const uint2 e1 = *reinterpret_cast<const uint2*>(t + alo + 4096 + k * 128);
+                const uint2 f0 = *reinterpret_cast<const uint2*>(t + ahi + (k + 1) * 128);
+                const uint2 f1 = *reinterpret_cast<const uint2*>(t + ahi + 4096 + (k + 1) * 128);
+                r0 ^= e0.x ^ f0.x; r1 ^= e0.y ^ f0.y; r2 ^= e1.x ^ f1.x; r3 ^= e1.y ^ f1.y;
+            }
+        }
+        return w4(r0, r1, r2, r3);
+#else
+        const uint32_t* tw = tbl + c * (2 * 32 * 16 * 2);
+        uint32_t r0 = 0, r1 = 0, r2 = 0, r3 = 0;
+        uint32_t w[4] = { a.w0, a.w1, a.w2, a.w3 };
         for (int k = 0; k < 32; k++) {
             uint32_t v = (w[k >> 3] >> (4 * (k & 7))) & 15u;
-#ifdef __CUDA_ARCH__
-            uint2 lo = t[k * 16 + v];
-            uint2 hi = t[512 + k * 16 + v];
-            r0 ^= lo.x; r1 ^= lo.y; r2 ^= hi.x; r3 ^= hi.y;
-#else
             const uint32_t* e0 = tw + (k * 16 + v) * 2;
             const uint32_t* e1 = tw + (512 + k * 16 + v) * 2;
             r0 ^= e0[0]; r1 ^= e0[1]; r2 ^= e1[0]; r3 ^= e1[1];
-#endif
         }
         return w4(r0, r1, r2, r3);
+#endif
     }
 };
 

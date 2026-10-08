@@ -27,10 +27,13 @@ typedef struct NoidGpuJob {
 int         noid_gpu_device_count(void);
 // returns NULL on failure (see noid_gpu_last_error(NULL))
 void*       noid_gpu_create(int device, int mode, int threads_per_block, int blocks_per_sm, int nonces_per_thread);
+// lanes = nonces interleaved per thread (1 or 2, table/kop engines only)
+void*       noid_gpu_create2(int device, int mode, int threads_per_block, int blocks_per_sm, int nonces_per_thread, int lanes);
+int         noid_gpu_lanes(void* ctx);
 void        noid_gpu_destroy(void* ctx);
 const char* noid_gpu_name(void* ctx);
 const char* noid_gpu_last_error(void* ctx);
-uint32_t    noid_gpu_batch(void* ctx);              // nonces per scan call
+uint32_t    noid_gpu_batch(void* ctx);              // nonces per scan call (SM x bps x tpb x npt x lanes)
 int         noid_gpu_set_nonces_per_thread(void* ctx, int npt);
 int         noid_gpu_set_job(void* ctx, const NoidGpuJob* job);
 // scans lo32 in [lo32_start, lo32_start + batch); returns 0 on success.

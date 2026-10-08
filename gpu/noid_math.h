@@ -14,10 +14,16 @@
 //   * Karatsuba 16 -> 32 -> 64 -> 128 (27 base products).
 //   * The class split is linear, so the 9 Karatsuba operand words of a
 //     128-bit operand are XORs of the split of its 4 words.
+//   * "E/O" accumulation: the only Karatsuba terms that are not 32-bit aligned
+//     are the 9 middle products of the 32-bit level (offset 16). They are
+//     collected in a separate "odd" vector and shifted once at the end
+//     (8 funnel shifts instead of 18 shifts).
 //
-// Multiplication by the fixed MDS constants can use either the same routine
-// with a pre-split constant operand (NOID_CMUL_XMAD) or shared-memory nibble
-// tables (NOID_CMUL_TABLE).
+// Squaring: bit spreading with PRMT byte lookups (4 nibbles -> 4 bytes per
+// PRMT, see spread16).
+//
+// Multiplication by the fixed MDS constants uses shared-memory nibble tables
+// (noid_perm.h, CMulTable) or the generic multiply with a pre-split operand.
 #pragma once
 #include <stdint.h>
 
@@ -42,6 +48,28 @@ NOID_HD uint32_t fshl(uint32_t lo, uint32_t hi, int s)
     return __funnelshift_l(lo, hi, s);
 #else
     return (hi << s) | (lo >> (32 - s));
+#endif
+}
+
+// PTX prmt.b32 (default mode): result byte n is selected by nibble n of sel:
+// bits 0..2 pick a byte of {b:a} (0..3 = a, 4..7 = b); if bit 3 is set the
+// byte is replaced by the replicated sign bit of the picked byte.
+NOID_HD uint32_t prmt(uint32_t a, uint32_t b, uint32_t sel)
+{
+#ifdef __CUDA_ARCH__
+    uint32_t r;
+    asm("prmt.b32 %0, %1, %2, %3;" : "=r"(r) : "r"(a), "r"(b), "r"(sel));
+    return r;
+#else
+    uint32_t r = 0;
+    for (int n = 0; n < 4; n++) {
+        uint32_t s = (sel >> (4 * n)) & 15u;
+        uint32_t idx = s & 7u;
+        uint32_t byte = idx < 4 ? (a >> (8 * idx)) & 0xFFu : (b >> (8 * (idx - 4))) & 0xFFu;
+        if (s & 8u) byte = (byte & 0x80u) ? 0xFFu : 0u;
+        r |= byte << (8 * n);
+    }
+    return r;
 #endif
 }
 
@@ -111,29 +139,36 @@ NOID_HD KW kw(uint32_t w)
 }
 NOID_HD KW kwx(KW a, KW b) { KW r; r.s = s3x(a.s, b.s); r.m = s3x(a.m, b.m); return r; }
 
-// carry-less 32x32 -> 64 (lo, hi)
-NOID_HD void cm32(KW a, KW b, uint32_t& lo, uint32_t& hi)
+// carry-less 32x32 -> 64, E/O form:
+//   product = e0 + e1 * x^32 + o * x^16
+NOID_HD void cm32(KW a, KW b, uint32_t& e0, uint32_t& e1, uint32_t& o)
 {
     uint32_t L = cm16<0, 0>(a.s, b.s);
     uint32_t H = cm16<1, 1>(a.s, b.s);
-    uint32_t M = cm16<0, 0>(a.m, b.m) ^ L ^ H;
-    lo = L ^ (M << 16);
-    hi = H ^ (M >> 16);
+    uint32_t M = cm16<0, 0>(a.m, b.m);
+    e0 = L;
+    e1 = H;
+    o = M ^ L ^ H;
 }
 
-// carry-less 64x64 -> 128 of operand pairs (u0,u1) x (v0,v1)
-NOID_HD void cm64(KW u0, KW u1, KW v0, KW v1, uint32_t r[4])
+// carry-less 64x64 -> 128 of operand pairs (u0,u1) x (v0,v1), E/O form:
+//   product = sum e[j] x^(32 j) + sum o[j] x^(32 j + 16)
+NOID_HD void cm64(KW u0, KW u1, KW v0, KW v1, uint32_t e[4], uint32_t o[3])
 {
-    uint32_t l0, l1, h0, h1, m0, m1;
-    cm32(u0, v0, l0, l1);
-    cm32(u1, v1, h0, h1);
-    cm32(kwx(u0, u1), kwx(v0, v1), m0, m1);
+    uint32_t l0, l1, lo, h0, h1, ho, m0, m1, mo;
+    cm32(u0, v0, l0, l1, lo);
+    cm32(u1, v1, h0, h1, ho);
+    cm32(kwx(u0, u1), kwx(v0, v1), m0, m1, mo);
     m0 ^= l0 ^ h0;
     m1 ^= l1 ^ h1;
-    r[0] = l0;
-    r[1] = l1 ^ m0;
-    r[2] = h0 ^ m1;
-    r[3] = h1;
+    mo ^= lo ^ ho;
+    e[0] = l0;
+    e[1] = l1 ^ m0;
+    e[2] = h0 ^ m1;
+    e[3] = h1;
+    o[0] = lo;
+    o[1] = mo;
+    o[2] = ho;
 }
 
 // reduce a 256-bit carry-less product modulo x^128 + x^7 + x^2 + x + 1
@@ -162,19 +197,33 @@ NOID_HD KOp kop(W4 a)
 // full product of two split operands, reduced
 NOID_HD W4 kmul(const KOp& a, const KOp& b)
 {
-    uint32_t L[4], H[4], M[4], r[8];
-    cm64(a.a0, a.a1, b.a0, b.a1, L);
-    cm64(a.a2, a.a3, b.a2, b.a3, H);
-    cm64(kwx(a.a0, a.a2), kwx(a.a1, a.a3), kwx(b.a0, b.a2), kwx(b.a1, b.a3), M);
-    for (int i = 0; i < 4; i++) M[i] ^= L[i] ^ H[i];
-    r[0] = L[0];
-    r[1] = L[1];
-    r[2] = L[2] ^ M[0];
-    r[3] = L[3] ^ M[1];
-    r[4] = H[0] ^ M[2];
-    r[5] = H[1] ^ M[3];
-    r[6] = H[2];
-    r[7] = H[3];
+    uint32_t Le[4], Lo[3], He[4], Ho[3], Me[4], Mo[3], e[8], o[7], r[8];
+    cm64(a.a0, a.a1, b.a0, b.a1, Le, Lo);
+    cm64(a.a2, a.a3, b.a2, b.a3, He, Ho);
+    cm64(kwx(a.a0, a.a2), kwx(a.a1, a.a3), kwx(b.a0, b.a2), kwx(b.a1, b.a3), Me, Mo);
+    for (int i = 0; i < 4; i++) Me[i] ^= Le[i] ^ He[i];
+    for (int i = 0; i < 3; i++) Mo[i] ^= Lo[i] ^ Ho[i];
+    // even part (32-bit aligned): L + M x^64 + H x^128
+    e[0] = Le[0];
+    e[1] = Le[1];
+    e[2] = Le[2] ^ Me[0];
+    e[3] = Le[3] ^ Me[1];
+    e[4] = He[0] ^ Me[2];
+    e[5] = He[1] ^ Me[3];
+    e[6] = He[2];
+    e[7] = He[3];
+    // odd part (offset 16): same placement
+    o[0] = Lo[0];
+    o[1] = Lo[1];
+    o[2] = Lo[2] ^ Mo[0];
+    o[3] = Mo[1];
+    o[4] = Mo[2] ^ Ho[0];
+    o[5] = Ho[1];
+    o[6] = Ho[2];
+    // r = e + o * x^16
+    r[0] = e[0] ^ (o[0] << 16);
+    for (int i = 1; i < 7; i++) r[i] = e[i] ^ fshl(o[i - 1], o[i], 16);
+    r[7] = e[7] ^ (o[6] >> 16);
     return reduce256(r);
 }
 
@@ -184,25 +233,57 @@ NOID_HD W4 gmul(W4 a, W4 b)
     return kmul(ka, kb);
 }
 
-// bit spread of a 16-bit value into the even bits of a 32-bit word
-NOID_HD uint32_t spread16(uint32_t x)
+// Bit spread of the low 16 bits of x into the even bits of a 32-bit word
+// (nibble n -> byte n), with two PRMT byte lookups:
+//   * nibble < 8 : PRMT picks spread(n) from the table {SPA, SPB};
+//   * nibble >= 8: the sign flag of the selector makes that byte 0, while the
+//     second PRMT (selector with bit 3 flipped) picks spread(n & 7) | 0x40.
+// xf must be x ^ 0x88888888 (computed once per word by the caller).
+NOID_HD uint32_t spread16p(uint32_t x, uint32_t xf)
 {
-    x &= 0xFFFFu;
-    x = (x | (x << 8)) & 0x00FF00FFu;
-    x = (x | (x << 4)) & 0x0F0F0F0Fu;
-    x = (x | (x << 2)) & 0x33333333u;
-    x = (x | (x << 1)) & 0x55555555u;
-    return x;
+    // table bytes: T0[j] = spread(j), T1[j] = spread(j) | 0x40, j = 0..7
+    //   spread(0..7) = 00 01 04 05 10 11 14 15
+    const uint32_t t0lo = 0x05040100u, t0hi = 0x15141110u;
+    const uint32_t t1lo = 0x45444140u, t1hi = 0x55545150u;
+    return prmt(t0lo, t0hi, x) | prmt(t1lo, t1hi, xf);
 }
 
 NOID_HD W4 gsqr(W4 a)
 {
     uint32_t r[8];
-    r[0] = spread16(a.w0); r[1] = spread16(a.w0 >> 16);
-    r[2] = spread16(a.w1); r[3] = spread16(a.w1 >> 16);
-    r[4] = spread16(a.w2); r[5] = spread16(a.w2 >> 16);
-    r[6] = spread16(a.w3); r[7] = spread16(a.w3 >> 16);
+    uint32_t w[4] = { a.w0, a.w1, a.w2, a.w3 };
+    for (int i = 0; i < 4; i++) {
+        uint32_t x = w[i], xf = x ^ 0x88888888u;
+        r[2 * i] = spread16p(x, xf);
+        r[2 * i + 1] = spread16p(x >> 16, xf >> 16);
+    }
     return reduce256(r);
+}
+
+// x^7 = (x * x^2) * x^4 with one squaring and one multiply instance.
+// (Reusing the split of x in both multiplies saves ~60 instructions but keeps
+// 24 more registers alive: at 512 threads/block (64 registers) that spills.)
+#ifdef __CUDACC__
+#define NOID_MATH_UNROLL1 _Pragma("unroll 1")
+#else
+#define NOID_MATH_UNROLL1
+#endif
+NOID_HD W4 pow7(W4 x)
+{
+    W4 sq = x, x2 = x;
+    NOID_MATH_UNROLL1
+    for (int k = 0; k < 2; k++) {
+        sq = gsqr(sq);
+        if (k == 0) x2 = sq;
+    }
+    // sq = x^4
+    W4 a = x, b = x2;
+    NOID_MATH_UNROLL1
+    for (int k = 0; k < 2; k++) {
+        a = gmul(a, b);
+        b = sq;
+    }
+    return a;
 }
 
 // ---------------------------------------------------------------------------
