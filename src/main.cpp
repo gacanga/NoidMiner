@@ -14,6 +14,7 @@
 //   --log FILE           --args-file FILE (extra arguments read from a file)
 #include <stdio.h>
 #include <stdlib.h>
+#include <cstdlib>
 #include <string.h>
 #include <stdarg.h>
 #include <time.h>
@@ -30,6 +31,8 @@
 #include <signal.h>
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #include "noid_ref.h"
@@ -37,7 +40,7 @@
 #include "tls_conn.h"
 #include "../gpu/noid_gpu.h"
 
-#define NOIDMINER_VERSION "0.3.0"
+#define NOIDMINER_VERSION "0.3.1"
 
 using Clock = std::chrono::steady_clock;
 using noid::u128;
@@ -159,6 +162,9 @@ static std::string exe_directory(const char* argv0)
     std::string p = n ? std::string(buf, n) : std::string(argv0);
 #else
     std::string p = argv0;
+    char buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n > 0) p.assign(buf, (size_t)n);
 #endif
     size_t s = p.find_last_of("\\/");
     return s == std::string::npos ? "." : p.substr(0, s);
@@ -196,6 +202,9 @@ struct Share {
 };
 
 static std::atomic<bool> g_running(true);
+// set by a GPU worker after a CUDA error (e.g. unstable overclock): the process
+// then exits with code 3 so that run_pool.bat restarts it with fresh contexts
+static std::atomic<int> g_gpu_failed(0);
 static std::mutex g_mtx;
 static std::shared_ptr<const PoolJob> g_job;
 static bool g_paused = true;
@@ -212,10 +221,32 @@ struct GpuStat {
     std::atomic<int> npt{ 0 };
     std::atomic<int> scan_ms{ 0 };
     std::atomic<bool> alive{ false };
+    std::atomic<long long> beat_ms{ 0 };   // last worker loop iteration (watchdog)
     std::string name;
     int dev = -1;
 };
 static std::vector<std::unique_ptr<GpuStat>> g_stats;
+
+static long long now_ms()
+{
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
+
+// A GPU that hangs (unstable overclock in TCC mode: no driver timeout) never
+// returns from its scan and never reports an error. The watchdogs below end
+// the process instead, so run_pool.bat / the agent are never blocked.
+//   mining: a worker loop that has not turned for NOID_STUCK_MS -> exit code 4
+//   --test / --bench: overall deadline -> exit code 5
+#define NOID_STUCK_MS 20000
+static void deadline_watchdog(int seconds, const char* what)
+{
+    std::thread([seconds, what]() {
+        for (int i = 0; i < seconds * 10; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        LOG("%s TIMEOUT after %d s: a GPU is stuck (unstable clocks?), exiting with code 5", what, seconds);
+        fflush(nullptr);
+        std::_Exit(5);
+    }).detach();
+}
 static std::atomic<uint64_t> g_accepted(0), g_rejected(0), g_blocks(0), g_stale_dropped(0);
 static double g_accepted_work = 0;
 static std::atomic<uint64_t> g_pauses(0);               // sum of expected hashes of accepted shares
@@ -273,6 +304,7 @@ static void gpu_worker(const Config& cfg, int idx, int dev)
     void* g = noid_gpu_create2(dev, cfg.mode, cfg.tpb, cfg.bps, npt, cfg.lanes);
     if (!g) { LOG("GPU %d: init failed: %s", dev, noid_gpu_last_error(nullptr)); return; }
     st.name = noid_gpu_name(g);
+    st.beat_ms = now_ms();
     st.alive = true;
     LOG("GPU %d: %s, mode %s, %d threads/block, %d lane(s), %u nonces per scan", dev, st.name.c_str(), mode_name(cfg.mode), cfg.tpb, noid_gpu_lanes(g), noid_gpu_batch(g));
 
@@ -287,6 +319,7 @@ static void gpu_worker(const Config& cfg, int idx, int dev)
     std::vector<uint32_t> found(1024);
 
     while (g_running) {
+        st.beat_ms = now_ms();
         std::shared_ptr<const PoolJob> snap;
         bool paused;
         {
@@ -314,7 +347,12 @@ static void gpu_worker(const Config& cfg, int idx, int dev)
             lo32 = 0;
             NoidGpuJob gj;
             make_gpu_job(cj, noid::mk((uint64_t)hi32 << 32, upper), job->share_target, gj);
-            if (noid_gpu_set_job(g, &gj) != 0) { LOG("GPU %d: set_job failed: %s", dev, noid_gpu_last_error(g)); break; }
+            if (noid_gpu_set_job(g, &gj) != 0) {
+                LOG("GPU %d: set_job failed: %s", dev, noid_gpu_last_error(g));
+                g_gpu_failed = dev + 1;
+                g_running = false;
+                break;
+            }
         }
         uint32_t batch = noid_gpu_batch(g);
         if ((uint64_t)lo32 + batch > 0x100000000ULL) {
@@ -328,6 +366,8 @@ static void gpu_worker(const Config& cfg, int idx, int dev)
         auto t0 = Clock::now();
         if (noid_gpu_scan(g, lo32, found.data(), (int)found.size(), &nf) != 0) {
             LOG("GPU %d: scan failed: %s", dev, noid_gpu_last_error(g));
+            g_gpu_failed = dev + 1;
+            g_running = false;
             break;
         }
         double ms = std::chrono::duration<double, std::milli>(Clock::now() - t0).count();
@@ -835,8 +875,8 @@ int main(int argc, char** argv)
     signal(SIGTERM, on_signal);
     LOG("NoidMiner %s (ParanO(1)d / NOID, Poseidon2b) - no dev fee%s", NOIDMINER_VERSION, have_conf ? "" : " - no config file");
 
-    if (cfg.test) return run_tests(cfg);
-    if (cfg.bench) return run_bench(cfg);
+    if (cfg.test) { deadline_watchdog(240, "TEST"); return run_tests(cfg); }
+    if (cfg.bench) { deadline_watchdog(cfg.bench_seconds + 120, "BENCH"); return run_bench(cfg); }
 
     if (cfg.pools.empty() || cfg.user.empty()) { LOG("missing pool url or user (address.rig), see noidminer.conf"); return 2; }
     std::vector<int> devs = selected_devices(cfg);
@@ -859,7 +899,21 @@ int main(int argc, char** argv)
     auto t_last = Clock::now();
     auto t_start = Clock::now();
     while (g_running) {
-        for (int i = 0; i < cfg.stats * 10 && g_running; i++) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        for (int i = 0; i < cfg.stats * 10 && g_running; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            if (i % 10 != 9) continue;
+            long long t = now_ms();
+            for (size_t k = 0; k < g_stats.size(); k++) {
+                if (!g_stats[k]->alive) continue;
+                long long idle = t - g_stats[k]->beat_ms.load();
+                if (idle > NOID_STUCK_MS) {
+                    LOG("GPU %d stuck for %lld s (scan never returned, unstable clocks?): exiting with code 4 for an automatic restart",
+                        g_stats[k]->dev, idle / 1000);
+                    fflush(nullptr);
+                    std::_Exit(4);
+                }
+            }
+        }
         if (!g_running) break;
         double secs = std::chrono::duration<double>(Clock::now() - t_last).count();
         t_last = Clock::now();
@@ -878,10 +932,24 @@ int main(int argc, char** argv)
         double work;
         { std::lock_guard<std::mutex> lk(g_mtx); paused = g_paused; work = g_accepted_work; }
         double up = std::chrono::duration<double>(Clock::now() - t_start).count();
-        LOG("%.2f MH/s total (%s) | shares %llu/%llu, stale dropped %llu | pool-side %.2f MH/s | blocks %llu%s", total / 1e6, per.c_str(),
+        // wrong GPU candidates (CPU re-check failed): a sign of an unstable overclock
+        std::string bad;
+        for (size_t i = 0; i < g_stats.size(); i++) {
+            uint64_t b = g_stats[i]->bad;
+            if (b) { char x[48]; snprintf(x, sizeof x, "%sGPU%d %llu", bad.empty() ? "" : ", ", g_stats[i]->dev, (unsigned long long)b); bad += x; }
+        }
+        LOG("%.2f MH/s total (%s) | shares %llu/%llu, stale dropped %llu | pool-side %.2f MH/s | blocks %llu%s%s%s", total / 1e6, per.c_str(),
             (unsigned long long)g_accepted.load(), (unsigned long long)(g_accepted.load() + g_rejected.load()),
             (unsigned long long)g_stale_dropped.load(), up > 0 ? work / up / 1e6 : 0.0,
-            (unsigned long long)g_blocks.load(), paused ? " | waiting for work" : "");
+            (unsigned long long)g_blocks.load(), paused ? " | waiting for work" : "",
+            bad.empty() ? "" : " | GPU ERRORS: ", bad.c_str());
+    }
+    if (g_gpu_failed) {
+        // do not wait for the other threads: a GPU in error state can block,
+        // and the pool thread may sit in a TLS read. Exit, run_pool.bat restarts.
+        LOG("GPU %d failed (CUDA error): exiting with code 3 for an automatic restart", g_gpu_failed.load() - 1);
+        fflush(nullptr);
+        std::_Exit(3);
     }
     LOG("stopping...");
     for (auto& t : th) t.join();
