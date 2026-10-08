@@ -42,8 +42,24 @@ Command line help: `noidminer.exe --help`. The main options are:
 | GPU | MH/s | Notes |
 |---|---|---|
 | P104-100 (stock, ~175 W) | ~5.2 | v0.3, engine `table`, 512 threads per block (v0.2: ~4.75) |
+| P104-100 (tuned, 180 W power limit unchanged) | ~5.77 | GPU clock +200 MHz, memory −500 MHz |
 
-This proof of work needs no memory bandwidth. Lowering the memory clock or the power limit saves power for little hashrate.
+Engines on the same rig (5× P104-100, tuned): `table` 28.9 MH/s, `tower` 26.8, `kop` 18.8. Keep `table`.
+
+### Tuning (P104-100)
+
+This proof of work needs no memory bandwidth, and the cards hit their power limit. The best results come from lowering the memory clock and shifting the GPU clock up at the **same** power limit, which works like an undervolt. Measured on a 5-card rig:
+
+| Setting | Result |
+|---|---|
+| Memory −500 MHz | Memory at ~3000 MHz instead of 5005, no hashrate loss, frees watts for the GPU |
+| GPU +200 MHz | ~1900 MHz instead of ~1720 at 180 W: **+9.6%** (5.2 → 5.77 MH/s per card) |
+| GPU +250 MHz | **Unstable on 4 of 5 cards**: wrong results, a hung GPU, crashes |
+| GPU +300 MHz | Unstable |
+
+- These are measurements on one rig, not a guarantee. Silicon quality, temperature, BIOS and power supply change the result. Start at +100 MHz and go up in steps.
+- After each step, run `test.bat` / `./test.sh`: they compare every GPU against the CPU, so unstable clocks show up as `FAILED`.
+- While mining, a `GPU ERRORS` count in the stats line is the first sign of unstable clocks. Since v0.3.1, a crashed or hung GPU makes the miner exit and restart.
 
 ## Requirements
 
@@ -125,4 +141,4 @@ Mineur GPU open source pour **ParanO(1)d (NOID)**, sous **Windows x64** avec **N
 
 `test.bat` vérifie les calculs et `bench.bat` mesure le hashrate.
 
-**Performance :** environ 5,2 MH/s par P104-100 (v0.3). L'algorithme n'utilise pas la mémoire : baisser l'horloge mémoire ou la limite de puissance économise du courant sans perte notable de hashrate.
+**Performance :** environ 5,2 MH/s par P104-100 d'origine, **5,77 MH/s** réglée (GPU +200 MHz, mémoire −500 MHz, limite de 180 W inchangée). +250 MHz s'est montré instable sur 4 cartes sur 5 : vérifiez chaque réglage avec `test.bat` / `./test.sh`. L'algorithme n'utilise pas la mémoire : baisser l'horloge mémoire ou la limite de puissance économise du courant sans perte notable de hashrate.
